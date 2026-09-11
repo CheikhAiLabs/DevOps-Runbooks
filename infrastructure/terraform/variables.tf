@@ -70,8 +70,8 @@ variable "tags" {
 }
 
 
-variable "deployer_cidr" {
-  description = "Optional temporary CIDR used by CI/CD runner for SSH deployment"
+variable "runner_cidr" {
+  description = "CIDR of the persistent GitHub Actions self-hosted runner"
   type        = string
   default     = null
 }

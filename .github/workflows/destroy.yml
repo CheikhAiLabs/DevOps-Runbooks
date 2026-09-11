@@ -17,7 +17,7 @@ concurrency:
 jobs:
   destroy:
     if: ${{ inputs.confirmation == 'DESTROY' }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, devops-runbooks]
     environment: production
 
     env:
@@ -31,6 +31,7 @@ jobs:
       AWS_PAGER: ""
 
       TF_VAR_ssh_allowed_cidr: ${{ vars.OPERATOR_CIDR }}
+      TF_VAR_runner_cidr: ${{ vars.RUNNER_CIDR }}
 
     steps:
       - name: Checkout

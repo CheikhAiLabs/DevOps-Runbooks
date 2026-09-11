@@ -20,6 +20,17 @@ resource "scaleway_instance_security_group" "main" {
     ip_range = var.ssh_allowed_cidr
   }
 
+  dynamic "inbound_rule" {
+    for_each = var.runner_cidr != null && var.runner_cidr != "" ? [var.runner_cidr] : []
+
+    content {
+      action   = "accept"
+      protocol = "TCP"
+      port     = 22
+      ip_range = inbound_rule.value
+    }
+  }
+
   inbound_rule {
     action   = "accept"
     protocol = "TCP"
