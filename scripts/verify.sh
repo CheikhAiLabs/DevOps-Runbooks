@@ -65,13 +65,9 @@ else
   FAILED=1
 fi
 
-printf "%-18s " "HTTPS / Web UI"
-if curl -fsS --max-time 25 "https://$FQDN" | grep -i "Runbook AI" >/dev/null; then
-  echo "✓ OK"
-else
-  echo "✗ FAILED"
-  FAILED=1
-fi
+check_remote \
+  "HTTPS / Web UI" \
+  "curl -fsS --max-time 25 --resolve '$FQDN:443:127.0.0.1' 'https://$FQDN' | grep -i 'Runbook AI' >/dev/null" || FAILED=1
 
 check_remote \
   "Docker" \

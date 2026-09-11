@@ -61,8 +61,8 @@ jobs:
         shell: bash
         run: |
           install -d -m 700 ~/.ssh
-          printf '%s\n' "${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}" > ${{ runner.temp }}/deploy_key
+          chmod 600 ${{ runner.temp }}/deploy_key
 
       - name: Terraform init
         run: terraform -chdir=infrastructure/terraform init
@@ -95,7 +95,7 @@ jobs:
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               -o ConnectTimeout=5 \
-              -i ~/.ssh/deploy_key \
+              -i ${{ runner.temp }}/deploy_key \
               -o IdentitiesOnly=yes \
               root@${{ steps.tf.outputs.public_ip }} \
               true 2>/dev/null; then
@@ -115,7 +115,7 @@ jobs:
           ansible-playbook \
             -i '${{ steps.tf.outputs.public_ip }},' \
             -u root \
-            --private-key ~/.ssh/deploy_key \
+            --private-key ${{ runner.temp }}/deploy_key \
             infrastructure/ansible/playbook.yml \
             -e "public_ip=${{ steps.tf.outputs.public_ip }}" \
             -e "client_ip=${{ vars.OPERATOR_CIDR }}" \
@@ -124,7 +124,7 @@ jobs:
       - name: Verify
         env:
           RUNBOOK_FQDN: ${{ steps.tf.outputs.fqdn }}
-          SSH_PRIVATE_KEY: /home/runner/.ssh/deploy_key
+          SSH_PRIVATE_KEY: ${{ runner.temp }}/deploy_key
         run: ./scripts/verify.sh
 
       - name: Deployment summary
@@ -135,6 +135,6 @@ jobs:
             echo
             echo "- Status: **${{ job.status }}**"
             echo "- FQDN: https://${{ steps.tf.outputs.fqdn }}"
-            echo "- Runner IPv4: ${{ steps.runner.outputs.ip }}"
+            echo "- Runner: scaleway-devops-runbooks-01"
             echo "- Terraform remote state: Scaleway Object Storage"
           } >> "$GITHUB_STEP_SUMMARY"
