@@ -277,6 +277,8 @@
       environment:
         RSYNC_RSH: >-
           ssh
+          -i {{ ansible_private_key_file }}
+          -o IdentitiesOnly=yes
           -o StrictHostKeyChecking=no
           -o UserKnownHostsFile=/dev/null
       changed_when: true
