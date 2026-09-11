@@ -1,0 +1,17 @@
+[Unit]
+Description=DevOps Runbooks Web UI
+After=network-online.target devops-runbooks-rag.service
+Requires=devops-runbooks-rag.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/srv/devops-runbooks/app/web
+Environment=NODE_ENV=production
+Environment=PORT=3000
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

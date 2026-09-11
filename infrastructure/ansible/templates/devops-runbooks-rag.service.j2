@@ -1,0 +1,23 @@
+[Unit]
+Description=DevOps Runbooks RAG API
+After=network-online.target docker.service devops-runbooks-llm.service
+Requires=devops-runbooks-llm.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/srv/devops-runbooks/app/rag-api
+Environment=HF_HOME=/srv/devops-runbooks/models/huggingface
+Environment=OMP_NUM_THREADS=48
+Environment=MKL_NUM_THREADS=48
+Environment=TORCH_NUM_THREADS=48
+Environment=QDRANT_URL=http://127.0.0.1:6333
+Environment=QDRANT_COLLECTION=runbook_linux_v4
+Environment=LLM_URL=http://127.0.0.1:8080/v1/chat/completions
+ExecStart=/srv/devops-runbooks/app/venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

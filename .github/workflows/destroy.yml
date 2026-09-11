@@ -1,0 +1,52 @@
+name: Destroy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type DESTROY to confirm'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    if: ${{ inputs.confirmation == 'DESTROY' }}
+    runs-on: ubuntu-latest
+    environment: production
+
+    env:
+      SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+      SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+      TF_VAR_project_id: ${{ secrets.SCW_PROJECT_ID }}
+
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCW_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_KEY }}
+      AWS_DEFAULT_REGION: fr-par
+      AWS_PAGER: ""
+
+      TF_VAR_ssh_allowed_cidr: ${{ vars.OPERATOR_CIDR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.16.1
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: terraform -chdir=infrastructure/terraform init
+
+      - name: Destroy plan
+        run: terraform -chdir=infrastructure/terraform plan -destroy
+
+      - name: Destroy
+        run: terraform -chdir=infrastructure/terraform destroy -auto-approve

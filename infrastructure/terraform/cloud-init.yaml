@@ -1,0 +1,58 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - rsync
+  - unzip
+  - python3
+  - python3-pip
+  - python3-venv
+  - build-essential
+  - cmake
+  - ninja-build
+  - numactl
+
+write_files:
+  - path: /etc/sysctl.d/99-devops-runbooks.conf
+    permissions: '0644'
+    content: |
+      vm.swappiness=10
+      vm.max_map_count=1048576
+      fs.file-max=2097152
+      net.core.somaxconn=65535
+
+  - path: /usr/local/sbin/setup-runbooks-storage.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      ROOT_SOURCE=$(findmnt -n -o SOURCE /)
+      ROOT_DISK=$(lsblk -no PKNAME "$ROOT_SOURCE" 2>/dev/null || true)
+      DATA_DISK=""
+      while read -r DEVICE TYPE; do
+        [ "$TYPE" = "disk" ] || continue
+        [ "$(basename "$DEVICE")" = "$ROOT_DISK" ] && continue
+        DATA_DISK="$DEVICE"
+        break
+      done < <(lsblk -dpno NAME,TYPE)
+      [ -n "$DATA_DISK" ] || { echo "No secondary disk found"; exit 1; }
+      if ! blkid "$DATA_DISK" >/dev/null 2>&1; then
+        mkfs.ext4 -F -L devops-runbooks "$DATA_DISK"
+      fi
+      mkdir -p /srv/devops-runbooks
+      UUID=$(blkid -s UUID -o value "$DATA_DISK")
+      grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /srv/devops-runbooks ext4 defaults,noatime,nofail 0 2" >> /etc/fstab
+      mountpoint -q /srv/devops-runbooks || mount /srv/devops-runbooks
+      mkdir -p /srv/devops-runbooks/{app,data/raw,data/clean,data/chunks,data/manifests,models/huggingface,models/llm,qdrant,docker,backups,logs}
+      chmod 755 /srv/devops-runbooks
+
+runcmd:
+  - sysctl --system
+  - /usr/local/sbin/setup-runbooks-storage.sh
+  - touch /var/lib/devops-runbooks-cloud-init-complete
+
+final_message: "DevOps Runbooks base infrastructure bootstrap complete"

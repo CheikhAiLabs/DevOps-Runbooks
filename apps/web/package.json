@@ -1,0 +1,20 @@
+{
+  "name": "devops-runbooks-web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -H 127.0.0.1 -p 3000"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.3.0",
+    "lucide-react": "^1.44.0",
+    "next": "^16.3.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tailwindcss": "^4.3.0"
+  }
+}

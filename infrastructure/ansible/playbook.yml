@@ -1,0 +1,506 @@
+---
+- name: Deploy DevOps Runbooks RAG platform
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    app_root: /srv/devops-runbooks
+    llama_tag: b10886
+    certbot_version: "5.4.0"
+  tasks:
+    - name: Wait for cloud-init
+      ansible.builtin.command: cloud-init status --wait
+      register: cloud_init_status
+      changed_when: false
+      failed_when:
+        - cloud_init_status.rc not in [0, 2]
+        - "'status: done' not in cloud_init_status.stdout"
+      tags: [base]
+
+    - name: Ensure base packages
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - git
+          - jq
+          - rsync
+          - python3
+          - python3-venv
+          - python3-pip
+          - build-essential
+          - cmake
+          - ninja-build
+          - nginx
+          - tesseract-ocr
+          - tesseract-ocr-eng
+          - tesseract-ocr-fra
+        state: present
+      tags: [base, nginx]
+
+    - name: Ensure data directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ app_root }}/app"
+        - "{{ app_root }}/app/rag-api"
+        - "{{ app_root }}/app/indexer"
+        - "{{ app_root }}/app/web"
+        - "{{ app_root }}/app/qdrant"
+        - "{{ app_root }}/models/huggingface"
+        - "{{ app_root }}/models/llm"
+        - "{{ app_root }}/qdrant"
+        - /var/www/letsencrypt/.well-known/acme-challenge
+      tags: [base]
+
+    - name: Install Docker apt key
+      ansible.builtin.shell: |
+        set -euo pipefail
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+      args:
+        executable: /bin/bash
+        creates: /etc/apt/keyrings/docker.asc
+      tags: [docker]
+
+    - name: Configure Docker repository
+      ansible.builtin.shell: |
+        set -euo pipefail
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo ${UBUNTU_CODENAME:-$VERSION_CODENAME}) stable" > /etc/apt/sources.list.d/docker.list
+      args:
+        executable: /bin/bash
+      changed_when: false
+      tags: [docker]
+
+    - name: Install Docker
+      ansible.builtin.apt:
+        update_cache: true
+        name: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin]
+        state: present
+      tags: [docker]
+
+    - name: Configure Docker data root
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: |
+          {
+            "data-root": "/srv/devops-runbooks/docker",
+            "log-driver": "json-file",
+            "log-opts": {"max-size": "100m", "max-file": "5"}
+          }
+      notify: Restart docker
+      tags: [docker]
+
+    - name: Ensure Docker running
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+      tags: [docker]
+
+    # Docker's data-root must be active BEFORE containers are created.
+    # Without this flush, the restart handler runs at the end of the play
+    # and containers started earlier may disappear from the new data-root.
+    - name: Apply Docker configuration before starting containers
+      ansible.builtin.meta: flush_handlers
+      tags: [docker, qdrant]
+
+    - name: Verify Docker data root
+      ansible.builtin.command:
+        argv:
+          - docker
+          - info
+          - --format
+          - "{{ '{{' }} .DockerRootDir {{ '}}' }}"
+      register: docker_root
+      changed_when: false
+      failed_when: docker_root.stdout.strip() != app_root + "/docker"
+      tags: [docker]
+
+    - name: Deploy Qdrant compose
+      ansible.builtin.template:
+        src: qdrant-compose.yml.j2
+        dest: "{{ app_root }}/app/qdrant/docker-compose.yml"
+        mode: "0644"
+      tags: [qdrant]
+
+    - name: Start Qdrant
+      ansible.builtin.command: docker compose up -d
+      args:
+        chdir: "{{ app_root }}/app/qdrant"
+      changed_when: false
+      tags: [qdrant]
+
+    - name: Wait for Qdrant
+      ansible.builtin.uri:
+        url: http://127.0.0.1:6333/healthz
+        status_code: 200
+      register: qdrant_health
+      retries: 30
+      delay: 2
+      until: qdrant_health.status == 200
+      tags: [qdrant]
+
+    - name: Copy RAG API
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../apps/api/"
+        dest: "{{ app_root }}/app/rag-api/"
+        mode: preserve
+      tags: [app]
+
+    - name: Copy indexer
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../services/indexer/"
+        dest: "{{ app_root }}/app/indexer/"
+        mode: preserve
+      tags: [app, index]
+
+    - name: Copy helper scripts
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../scripts/{{ item }}"
+        dest: "{{ app_root }}/app/{{ item }}"
+        mode: "0755"
+      loop: [download-models.py, bootstrap-index.sh]
+      tags: [app, models, index]
+
+    - name: Create Python virtual environment
+      ansible.builtin.command: python3 -m venv "{{ app_root }}/app/venv"
+      args:
+        creates: "{{ app_root }}/app/venv/bin/python"
+      tags: [python]
+
+    - name: Upgrade pip
+      ansible.builtin.command: "{{ app_root }}/app/venv/bin/pip install --upgrade pip wheel setuptools"
+      changed_when: false
+      tags: [python]
+
+    - name: Install CPU-only PyTorch
+      ansible.builtin.shell: |
+        set -euo pipefail
+        {{ app_root }}/app/venv/bin/python -c 'import torch; assert "+cpu" in torch.__version__ or not torch.cuda.is_available()' 2>/dev/null || \
+        {{ app_root }}/app/venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
+      args:
+        executable: /bin/bash
+      changed_when: false
+      tags: [python]
+
+    - name: Install Python application dependencies
+      ansible.builtin.command: "{{ app_root }}/app/venv/bin/pip install -r {{ app_root }}/app/rag-api/requirements.txt -r {{ app_root }}/app/indexer/requirements.txt"
+      changed_when: false
+      tags: [python]
+
+    - name: Download model artifacts idempotently
+      ansible.builtin.shell: |
+        set -euo pipefail
+        echo "[MODELS] Downloading/caching local AI models" | tee -a /tmp/devops-runbooks-progress.log
+        {{ app_root }}/app/venv/bin/python -u {{ app_root }}/app/download-models.py 2>&1 | tee -a /tmp/devops-runbooks-progress.log
+      args:
+        executable: /bin/bash
+      environment:
+        HF_HOME: "{{ app_root }}/models/huggingface"
+      register: model_download
+      changed_when: "'Downloading' in model_download.stdout or 'Caching' in model_download.stdout"
+      tags: [models]
+
+    - name: Checkout pinned llama.cpp
+      ansible.builtin.git:
+        repo: https://github.com/ggml-org/llama.cpp.git
+        dest: "{{ app_root }}/app/llama.cpp"
+        version: "{{ llama_tag }}"
+        depth: 1
+        force: false
+      tags: [llama]
+
+    - name: Configure llama.cpp CPU build
+      ansible.builtin.command: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON
+      args:
+        chdir: "{{ app_root }}/app/llama.cpp"
+      changed_when: false
+      tags: [llama]
+
+    - name: Build llama.cpp
+      ansible.builtin.shell: |
+        set -euo pipefail
+        echo "[LLAMA] Building llama.cpp" | tee -a /tmp/devops-runbooks-progress.log
+        cmake --build build -j 48 --target llama-server llama-cli llama-bench 2>&1 | tee -a /tmp/devops-runbooks-progress.log
+      args:
+        executable: /bin/bash
+        chdir: "{{ app_root }}/app/llama.cpp"
+      changed_when: false
+      tags: [llama]
+
+    - name: Build Linux knowledge index if missing
+      ansible.builtin.shell: |
+        set -euo pipefail
+        echo "[INDEX] Preparing Linux knowledge base" | tee -a /tmp/devops-runbooks-progress.log
+        {{ app_root }}/app/bootstrap-index.sh 2>&1 | tee -a /tmp/devops-runbooks-progress.log
+      args:
+        executable: /bin/bash
+      environment:
+        FORCE_REINDEX: "{{ force_reindex | default(false) | ternary('1','0') }}"
+        PYTHONUNBUFFERED: "1"
+      changed_when: false
+      tags: [index]
+
+    - name: Ensure rsync is installed
+      ansible.builtin.apt:
+        name: rsync
+        state: present
+        update_cache: false
+      tags: [web]
+
+    - name: Synchronize web application from controller
+      ansible.builtin.command:
+        argv:
+          - rsync
+          - -az
+          - --delete
+          - --exclude
+          - node_modules
+          - --exclude
+          - .next
+          - --exclude
+          - .DS_Store
+          - --exclude
+          - "*.before-*"
+          - "{{ playbook_dir }}/../../apps/web/"
+          - "root@{{ inventory_hostname }}:{{ app_root }}/app/web/"
+      delegate_to: localhost
+      become: false
+      environment:
+        RSYNC_RSH: >-
+          ssh
+          -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+      changed_when: true
+      tags: [web]
+
+    - name: Add NodeSource repository
+      ansible.builtin.shell: curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      args:
+        executable: /bin/bash
+      changed_when: false
+      tags: [web]
+
+    - name: Install Node.js
+      ansible.builtin.apt:
+        name: nodejs
+        state: present
+      tags: [web]
+
+    - name: Install web dependencies
+      ansible.builtin.command: npm ci
+      args:
+        chdir: "{{ app_root }}/app/web"
+      changed_when: false
+      tags: [web]
+
+    - name: Remove previous Next.js build
+      ansible.builtin.file:
+        path: "{{ app_root }}/app/web/.next"
+        state: absent
+      tags: [web]
+
+    - name: Build web application
+      ansible.builtin.shell: |
+        set -euo pipefail
+        echo "[WEB] Building Next.js production UI" | tee -a /tmp/devops-runbooks-progress.log
+        npm run build 2>&1 | tee -a /tmp/devops-runbooks-progress.log
+      args:
+        executable: /bin/bash
+        chdir: "{{ app_root }}/app/web"
+      environment:
+        NODE_ENV: production
+      changed_when: false
+      tags: [web]
+
+    - name: Install systemd units
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "/etc/systemd/system/{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - {src: devops-runbooks-llm.service.j2, dest: devops-runbooks-llm.service}
+        - {src: devops-runbooks-rag.service.j2, dest: devops-runbooks-rag.service}
+        - {src: devops-runbooks-web.service.j2, dest: devops-runbooks-web.service}
+      notify: Reload systemd
+      tags: [services]
+
+    - name: Flush systemd handlers
+      ansible.builtin.meta: flush_handlers
+      tags: [services]
+
+    - name: Enable and start LLM
+      ansible.builtin.systemd:
+        name: devops-runbooks-llm.service
+        enabled: true
+        state: restarted
+      tags: [services]
+
+    - name: Wait for LLM health
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/health
+        status_code: 200
+      register: llm_health
+      retries: 90
+      delay: 5
+      until: llm_health.status == 200
+      tags: [services]
+
+    - name: Enable and start RAG API
+      ansible.builtin.systemd:
+        name: devops-runbooks-rag.service
+        enabled: true
+        state: restarted
+      tags: [services]
+
+    - name: Wait for RAG health
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8000/health
+        status_code: 200
+      register: rag_health
+      retries: 90
+      delay: 3
+      until: rag_health.status == 200
+      tags: [services]
+
+    - name: Enable and start Web UI
+      ansible.builtin.systemd:
+        name: devops-runbooks-web.service
+        enabled: true
+        state: restarted
+      tags: [services, web]
+
+    - name: Wait for Web UI
+      ansible.builtin.uri:
+        url: http://127.0.0.1:3000
+        status_code: 200
+      register: web_health
+      retries: 60
+      delay: 2
+      until: web_health.status == 200
+      tags: [services, web]
+
+    - name: Remove default Nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      tags: [nginx]
+
+    - name: Install initial HTTP Nginx config
+      ansible.builtin.template:
+        src: nginx-http.conf.j2
+        dest: /etc/nginx/sites-available/devops-runbooks
+        mode: "0644"
+      tags: [nginx]
+
+    - name: Enable Nginx site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/devops-runbooks
+        dest: /etc/nginx/sites-enabled/devops-runbooks
+        state: link
+        force: true
+      tags: [nginx]
+
+    - name: Validate initial Nginx config
+      ansible.builtin.command: nginx -t
+      changed_when: false
+      tags: [nginx]
+
+    - name: Start Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: restarted
+      tags: [nginx]
+
+    - name: Install Certbot virtual environment
+      ansible.builtin.command: python3 -m venv /opt/certbot
+      args:
+        creates: /opt/certbot/bin/python
+      tags: [tls]
+
+    - name: Install Certbot 5.4+
+      ansible.builtin.command: "/opt/certbot/bin/pip install --upgrade certbot=={{ certbot_version }}"
+      changed_when: false
+      tags: [tls]
+
+    - name: Link Certbot
+      ansible.builtin.file:
+        src: /opt/certbot/bin/certbot
+        dest: /usr/local/bin/certbot
+        state: link
+        force: true
+      tags: [tls]
+
+    - name: Wait for Scaleway public FQDN to resolve
+      ansible.builtin.command: "getent ahostsv4 {{ fqdn }}"
+      register: fqdn_lookup
+      changed_when: false
+      retries: 60
+      delay: 2
+      until: public_ip in fqdn_lookup.stdout
+      tags: [tls]
+
+    - name: Request Let's Encrypt certificate for Scaleway FQDN
+      ansible.builtin.command: >-
+        /usr/local/bin/certbot certonly --non-interactive --agree-tos
+        --register-unsafely-without-email
+        --webroot --webroot-path /var/www/letsencrypt -d {{ fqdn }}
+      args:
+        creates: "/etc/letsencrypt/live/{{ fqdn }}/fullchain.pem"
+      tags: [tls]
+
+    - name: Install HTTPS Nginx config
+      ansible.builtin.template:
+        src: nginx-https.conf.j2
+        dest: /etc/nginx/sites-available/devops-runbooks
+        mode: "0644"
+      tags: [nginx, tls]
+
+    - name: Install certificate renewal units
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "/etc/systemd/system/{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - {src: cert-renew.service.j2, dest: devops-runbooks-cert-renew.service}
+        - {src: cert-renew.timer.j2, dest: devops-runbooks-cert-renew.timer}
+      notify: Reload systemd
+      tags: [tls]
+
+    - name: Validate final Nginx config
+      ansible.builtin.command: nginx -t
+      changed_when: false
+      tags: [nginx, tls]
+
+    - name: Restart Nginx with HTTPS
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+      tags: [nginx, tls]
+
+    - name: Enable certificate renewal timer
+      ansible.builtin.systemd:
+        name: devops-runbooks-cert-renew.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+      tags: [tls]
+
+  handlers:
+    - name: Restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+        daemon_reload: true
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true

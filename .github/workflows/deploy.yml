@@ -1,0 +1,153 @@
+name: Deploy Production
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "services/**"
+      - "infrastructure/**"
+      - "scripts/**"
+      - "Makefile"
+      - ".github/workflows/deploy.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    env:
+      SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+      SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+      TF_VAR_project_id: ${{ secrets.SCW_PROJECT_ID }}
+
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCW_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_KEY }}
+      AWS_DEFAULT_REGION: fr-par
+      AWS_PAGER: ""
+
+      TF_VAR_ssh_allowed_cidr: ${{ vars.OPERATOR_CIDR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.16.1
+          terraform_wrapper: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install Ansible
+        run: pip install ansible==14.4.0
+
+      - name: Configure deployment SSH key
+        shell: bash
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Detect runner public IPv4
+        id: runner
+        run: |
+          IP="$(curl -4 -fsS https://api.ipify.org)"
+          echo "ip=$IP" >> "$GITHUB_OUTPUT"
+          echo "TF_VAR_deployer_cidr=$IP/32" >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        run: terraform -chdir=infrastructure/terraform init
+
+      - name: Terraform plan
+        run: |
+          terraform -chdir=infrastructure/terraform plan \
+            -out=tfplan
+
+      - name: Terraform apply
+        run: |
+          terraform -chdir=infrastructure/terraform apply \
+            -auto-approve tfplan
+
+      - name: Read Terraform outputs
+        id: tf
+        run: |
+          PUBLIC_IP="$(terraform -chdir=infrastructure/terraform output -raw public_ip)"
+          SERVER_ID="$(terraform -chdir=infrastructure/terraform output -raw server_id)"
+          SERVER_UUID="${SERVER_ID##*/}"
+          FQDN="${SERVER_UUID}.pub.instances.scw.cloud"
+
+          echo "public_ip=$PUBLIC_IP" >> "$GITHUB_OUTPUT"
+          echo "fqdn=$FQDN" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for SSH
+        run: |
+          for i in $(seq 1 60); do
+            if ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=5 \
+              -i ~/.ssh/deploy_key \
+              -o IdentitiesOnly=yes \
+              root@${{ steps.tf.outputs.public_ip }} \
+              true 2>/dev/null; then
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          echo "SSH timeout"
+          exit 1
+
+      - name: Deploy with Ansible
+        env:
+          ANSIBLE_CONFIG: infrastructure/ansible/ansible.cfg
+        run: |
+          ansible-playbook \
+            -i '${{ steps.tf.outputs.public_ip }},' \
+            -u root \
+            --private-key ~/.ssh/deploy_key \
+            infrastructure/ansible/playbook.yml \
+            -e "public_ip=${{ steps.tf.outputs.public_ip }}" \
+            -e "client_ip=${{ vars.OPERATOR_CIDR }}" \
+            -e "fqdn=${{ steps.tf.outputs.fqdn }}"
+
+      - name: Verify
+        env:
+          RUNBOOK_FQDN: ${{ steps.tf.outputs.fqdn }}
+          SSH_PRIVATE_KEY: /home/runner/.ssh/deploy_key
+        run: ./scripts/verify.sh
+
+      - name: Remove temporary runner SSH access
+        if: always()
+        env:
+          TF_VAR_deployer_cidr: ""
+        run: |
+          terraform -chdir=infrastructure/terraform apply             -auto-approve             -input=false
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          {
+            echo "## 🚀 Production deployment"
+            echo
+            echo "- Status: **${{ job.status }}**"
+            echo "- FQDN: https://${{ steps.tf.outputs.fqdn }}"
+            echo "- Runner IPv4: ${{ steps.runner.outputs.ip }}"
+            echo "- Terraform remote state: Scaleway Object Storage"
+          } >> "$GITHUB_STEP_SUMMARY"

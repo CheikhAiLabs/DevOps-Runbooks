@@ -1,0 +1,15 @@
+[Unit]
+Description=DevOps Runbooks Qwen LLM
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/devops-runbooks/app/llama.cpp
+ExecStart=/srv/devops-runbooks/app/llama.cpp/build/bin/llama-server -m /srv/devops-runbooks/models/llm/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf --host 127.0.0.1 --port 8080 -t 64 -c 16384 -np 1
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+# Required
+project_id = "YOUR_SCALEWAY_PROJECT_ID"
+
+# Optional Terraform overrides. ssh_allowed_cidr is injected automatically by make deploy.
+# zone              = "fr-par-1"
+# server_type       = "COMPUTE3-X96C-192G"
+# root_disk_size_gb = 100
+# data_disk_size_gb = 500
+# data_disk_iops    = 5000
