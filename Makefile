@@ -91,17 +91,8 @@ access:
 	@./scripts/allow-ip.sh
 
 plan:
-	@set -eu; \
-	CLIENT_IP=$${CLIENT_IP:-$$(curl -4 -fsS https://api.ipify.org)}; \
-	PROJECT_ID=$${SCW_PROJECT_ID:-$${TF_VAR_project_id:-}}; \
-	if [ -z "$$PROJECT_ID" ] && [ -f infrastructure/terraform/terraform.tfvars ]; then \
-	  PROJECT_ID=$$(awk -F'"' '/^[[:space:]]*project_id[[:space:]]*=/ {print $$2; exit}' infrastructure/terraform/terraform.tfvars); \
-	fi; \
-	if [ -z "$$PROJECT_ID" ]; then printf 'Scaleway Project ID: '; read -r PROJECT_ID; fi; \
-	if [ -z "$$PROJECT_ID" ]; then printf '%s\n' 'ERROR: Scaleway Project ID is required.'; exit 1; fi; \
-	TF_VAR_project_id=$$PROJECT_ID \
-	TF_VAR_ssh_allowed_cidr=$${CLIENT_IP}/32 \
-	terraform -chdir=infrastructure/terraform plan
+	@./scripts/plan.sh
+
 
 fmt:
 	@terraform -chdir=infrastructure/terraform fmt -recursive

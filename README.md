@@ -28,11 +28,13 @@ The complete stack runs on Scaleway and uses local open-source models for embedd
 
 It combines a curated technical knowledge base with an interactive AI interface capable of handling conversational context, files, screenshots, configuration snippets, logs and source-backed troubleshooting.
 
-The entire platform can be provisioned from scratch with:
+The complete runner and application platform can be reconstructed with:
 
 ```bash
-make deploy
+make deploy-all
 ```
+
+Once the persistent runner exists, `make deploy` deploys or reconciles only the application stack through GitHub Actions.
 
 No manual configuration inside the server is required.
 
@@ -57,9 +59,11 @@ No manual configuration inside the server is required.
 - Request cancellation with Stop
 - Automatic HTTPS
 - IP-restricted application access
-- Fully automated Terraform + Ansible deployment
+- Fully automated Terraform + Ansible deployment through GitHub Actions
+- Persistent Scaleway self-hosted deployment runner
+- Independent application and runner Terraform stacks with remote state
 - Idempotent redeployment
-- Clean-room deployment support
+- Validated full-platform clean-room reconstruction
 - Automated health verification
 
 ---
@@ -199,7 +203,7 @@ flowchart TD
 
 The deployment follows a deliberately restricted network model.
 
-Publicly reachable ports:
+Application VM ingress ports:
 
 ```text
 22   SSH
@@ -219,7 +223,9 @@ Internal services remain bound to loopback:
 Additional controls include:
 
 - Scaleway Security Groups
-- SSH restricted to the operator public `/32`
+- Application VM SSH restricted to the operator public `/32` and self-hosted runner public `/32`
+- Runner VM SSH restricted to the operator public `/32`
+- Dedicated Security Groups for the application and runner
 - Application access restricted by Nginx
 - Automatic HTTPS
 - TLS 1.2 / TLS 1.3
@@ -233,36 +239,61 @@ Additional controls include:
 
 ## ☁️ Infrastructure
 
-The platform is deployed on Scaleway using:
+The platform has two independent Terraform stacks on Scaleway:
+
+| Stack | Directory | Managed resources |
+|---|---|---|
+| Application | `infrastructure/terraform/` | Large Compute instance for AI/RAG, Flexible IPv4, Block Storage and application Security Group |
+| Runner | `infrastructure/terraform-runner/` | Persistent GitHub Actions runner Compute instance, dedicated public IPv4 and dedicated Security Group |
+
+The self-hosted runner is registered in GitHub as `scaleway-devops-runbooks-01`. It remains available when the application stack is destroyed, so subsequent application deployments can reuse it.
 
 ```text
-Terraform
+GitHub
     │
-    ├── Compute Instance
+    ▼
+Scaleway self-hosted GitHub Actions runner
+    │
+    ▼
+Terraform application stack
+    │
+    ├── Compute instance
     ├── Flexible IPv4
     ├── Block Storage
-    └── Security Group
+    └── Application Security Group
             │
             ▼
         Ansible
             │
             ├── System packages
-            ├── Docker
-            ├── Qdrant
-            ├── AI models
-            ├── llama.cpp
-            ├── RAG API
-            ├── Next.js
-            ├── Nginx
-            ├── TLS
+            ├── Docker / Qdrant
+            ├── AI models / llama.cpp
+            ├── RAG API / Next.js
+            ├── Nginx / TLS
             └── systemd services
+                    │
+                    ▼
+            Production AI/RAG VM
 ```
 
-Persistent application data is stored under:
+### Remote Terraform state
+
+Both stacks use an S3-compatible backend in Scaleway Object Storage, with separate state keys:
+
+| Stack | Remote state key |
+|---|---|
+| Application | `production/terraform.tfstate` |
+| Runner | `runner/terraform.tfstate` |
+
+The state bucket is outside the resources destroyed by either lifecycle. Both `make destroy` and `make destroy-all` intentionally preserve it. Destroying a stack updates its remote state; it does not delete the remote-state backend.
+
+Persistent application data is stored on the application VM under:
 
 ```text
 /srv/devops-runbooks
 ```
+
+Application destruction includes its data volume. Preserving the Terraform state bucket does not preserve application data.
 
 ---
 
@@ -273,157 +304,177 @@ Persistent application data is stored under:
 The operator machine requires:
 
 - macOS or Linux
-- Terraform
+- Git and Terraform
 - Python 3
-- SSH
-- curl
-- valid Scaleway credentials
+- SSH and curl
+- GitHub CLI (`gh`), authenticated for this repository with workflow and runner-management access
+- Scaleway CLI (`scw`) and jq
+- Valid Scaleway credentials with access to the required Compute resources and Object Storage backend
 
-Ansible is automatically bootstrapped inside:
+Before the first full deployment, configure the existing remote-state backend and local application `terraform.tfvars` with your project selection. Runner bootstrap reads this local configuration; it does not prompt for a missing project selection. Keep machine-specific values out of Git.
 
-```text
-.deploy-venv
-```
+The deployment SSH key pair must be available locally for runner bootstrap. Configure the GitHub `production` environment with the Scaleway credentials, project selection, deployment SSH private key and `OPERATOR_CIDR`. Runner bootstrap installs and registers the runner, ensures its public SSH key is registered in Scaleway, and sets `RUNNER_CIDR` in that environment.
 
-### Deploy
+Ansible is installed by the production workflow. The local deployment helper bootstraps its own Ansible environment in `.deploy-venv` when used.
 
-Clone the repository:
+### Clone
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/CheikhAiLabs/DevOps-Runbooks.git
 cd DevOps-Runbooks
 ```
 
-Then run:
+### First or full deployment
+
+With the credentials and backend configured, create or reconcile the runner and application stacks:
+
+```bash
+make deploy-all
+```
+
+This bootstraps the runner, waits until GitHub reports it online, dispatches **Deploy Production**, waits for completion and runs application verification through the workflow.
+
+### Normal application deployment
+
+Once the runner exists and is online:
 
 ```bash
 make deploy
 ```
 
-On the first deployment, the Scaleway Project ID can be requested interactively and stored locally.
+This deploys or reconciles only the application stack using the existing runner. In a GitHub-connected, authenticated checkout, the command dispatches the workflow or offers to commit and push local changes, then waits for the deployment. Commit/push actions require confirmation.
 
-Subsequent deployments reuse the local configuration.
+The Makefile retains a local application-deployment fallback when GitHub CLI integration is unavailable. The validated production path uses GitHub Actions; the fallback does not provision the runner.
 
-The final application URL follows the Scaleway public FQDN format:
+### Application URL
+
+Both deployment commands print the final Application URL locally:
 
 ```text
 https://<server-uuid>.pub.instances.scw.cloud
 ```
 
+The same URL appears in the GitHub Actions **Deployment Summary** and workflow logs.
+
 ---
 
 ## 🔄 Deployment Flow
 
-`make deploy` performs the complete deployment workflow:
+### Application only — `make deploy`
 
 ```text
-1. Terraform infrastructure
-2. Scaleway DNS resolution
-3. SSH readiness
-4. cloud-init readiness
-5. Ansible configuration
-6. Docker / Qdrant setup
-7. Model preparation
-8. llama.cpp build
-9. Knowledge-base indexing
-10. API deployment
-11. Next.js production build
-12. Nginx configuration
-13. Let's Encrypt certificate
-14. systemd services
-15. Application health checks
+Workstation
+    → GitHub Deploy Production workflow
+    → Existing Scaleway self-hosted runner
+    → Terraform application stack
+    → Ansible
+    → End-to-end verification
+    → Application URL
 ```
 
-Long-running operations expose progress directly in the deployment terminal.
+### Full platform — `make deploy-all`
+
+```text
+Workstation
+    → Terraform runner stack
+    → Runner VM and SSH readiness
+    → Runner installation and GitHub registration
+    → Runner online
+    → GitHub Deploy Production workflow
+    → Terraform application stack
+    → Ansible
+    → End-to-end verification
+    → Application URL
+```
+
+The application deployment provisions the VM, public IPv4, data volume and Security Group; waits for SSH and cloud-init; installs Docker/Qdrant; prepares models; builds llama.cpp; indexes the knowledge base; deploys the API and Next.js; configures Nginx, DNS readiness, HTTPS and systemd; and runs health checks.
+
+Long-running operations expose progress in workflow logs. `scripts/watch-deploy.sh` waits for GitHub deployment completion and returns the final Application URL to the local terminal.
 
 Model downloads and knowledge indexing are idempotent when existing resources can safely be reused.
 
 ---
 
+## 🔧 GitHub Actions / CI/CD
+
+| Configuration | Purpose |
+|---|---|
+| `.github/workflows/ci.yml` | Validate changes on pull requests, pushes to `main`, or manual dispatch |
+| `.github/workflows/deploy.yml` | **Deploy Production** on deployment-related pushes to `main` or manual dispatch |
+| `.github/workflows/destroy.yml` | Manually destroy the application stack after the required confirmation |
+| `.github/dependabot.yml` | Weekly dependency updates for GitHub Actions, npm and Python |
+
+CI runs Terraform format and validation checks for the application stack, Python compilation, a Next.js production build, Ansible syntax checks, Bash syntax checks and ShellCheck.
+
+CI validation jobs use GitHub-hosted Ubuntu runners. Production deployment and the production destroy workflow use the persistent Scaleway self-hosted runner, selected by the `self-hosted`, `linux`, `x64` and `devops-runbooks` labels. They do not depend on an ephemeral GitHub-hosted deployment runner.
+
+Production workflows use the GitHub `production` environment and serialize deployment/destruction through the same concurrency group. Deployment runs Terraform, Ansible and verification, then publishes the status and Application URL in its summary and logs.
+
+---
+
 ## 🛠️ Operations
 
-```bash
-make deploy
-```
+The four primary lifecycle commands have separate scopes:
 
-Deploy or reconcile the complete platform.
+| Command | Scope | Behavior |
+|---|---|---|
+| `make deploy` | Application stack only | Use the existing runner to deploy/reconcile through GitHub, wait for completion and print the Application URL |
+| `make deploy-all` | Runner + application stack | Create/reconcile and register the runner, wait until it is online, deploy the application through GitHub, verify and print the Application URL |
+| `make destroy` | Application stack only | Destroy application resources, including the data volume; keep the runner and remote-state bucket |
+| `make destroy-all` | Application + runner stacks | Destroy the application first, remove the GitHub runner registration, then destroy runner infrastructure; preserve the remote-state bucket |
 
-```bash
-make verify
-```
+`make destroy-all` requires the `DESTROY-ALL` confirmation and removes the `RUNNER_CIDR` variable from the GitHub `production` environment when present and accessible. `make destroy` invokes the application Terraform destroy helper locally; the separate **Destroy Production** workflow provides an application-only GitHub Actions path.
 
-Run end-to-end health checks.
+Other operational commands remain available:
 
-```bash
-make status
-```
-
-Display application services, memory and disk status.
-
-```bash
-make logs
-```
-
-Follow application logs.
-
-```bash
-make reindex
-```
-
-Force a fresh knowledge-base crawl, chunking and indexing process.
-
-```bash
-make access
-```
-
-Update SSH and Nginx access rules with the operator's current public IP.
-
-```bash
-make plan
-```
-
-Display the Terraform execution plan.
-
-```bash
-make destroy
-```
-
-Destroy the Scaleway infrastructure managed by Terraform.
+| Command | Purpose |
+|---|---|
+| `make verify` | Run end-to-end application health checks |
+| `make status` | Display application services, memory and disk status |
+| `make logs` | Follow application logs |
+| `make reindex` | Force a fresh knowledge-base crawl, chunking and indexing process |
+| `make access` | Update SSH and Nginx access rules for the operator's current public IP |
+| `make plan` | Validate and display Terraform plans for both runner and application stacks |
 
 ---
 
 ## 🩺 Verification
 
-A successful deployment can be validated with:
+Application verification runs during production deployment and can also be invoked locally:
 
 ```bash
 make verify
 ```
 
-Expected components include:
+The checks cover:
 
 ```text
-HTTPS / Web UI     ✓
-Docker             ✓
-Qdrant             ✓
-LLM                ✓
-RAG API            ✓
-Next.js            ✓
-Nginx              ✓
-LLM service        ✓
-RAG service        ✓
-Web service        ✓
+DNS                   ✓
+HTTPS / Web UI        ✓
+Docker                ✓
+Qdrant                ✓
+LLM                   ✓
+RAG API               ✓
+Next.js               ✓
+Nginx                 ✓
+LLM systemd service   ✓
+RAG systemd service   ✓
+Web systemd service   ✓
 ```
 
-The deployment is designed to support the complete clean-room lifecycle:
+### Validated clean-room lifecycle
+
+The following full-platform lifecycle has been tested successfully:
 
 ```bash
-make destroy
-make deploy
+make destroy-all
+make deploy-all
 make verify
 ```
 
-without requiring manual server-side intervention.
+The validated run destroyed the application stack and runner infrastructure, removed the GitHub runner registration, and preserved the Object Storage remote-state backend. It then recreated and re-registered the runner, reconstructed the application stack from zero through Terraform and Ansible, passed all health checks, and returned the final Scaleway FQDN.
+
+No manual server-side intervention was required. Application-only redeployments reuse the persistent runner; the full lifecycle validates reconstruction of both stacks.
 
 ---
 
@@ -433,9 +484,17 @@ without requiring manual server-side intervention.
 .
 ├── Makefile
 │
+├── .github/
+│   ├── workflows/
+│   │   ├── ci.yml
+│   │   ├── deploy.yml
+│   │   └── destroy.yml
+│   └── dependabot.yml
+│
 ├── apps/
 │   ├── api/
 │   │   ├── app.py
+│   │   ├── file_extraction.py
 │   │   └── streaming.py
 │   │
 │   └── web/
@@ -447,9 +506,17 @@ without requiring manual server-side intervention.
 │
 ├── infrastructure/
 │   ├── terraform/
+│   ├── terraform-runner/
 │   └── ansible/
 │
 ├── scripts/
+│   ├── bootstrap-runner.sh
+│   ├── deploy-all.sh
+│   ├── deploy.sh
+│   ├── destroy-all.sh
+│   ├── destroy.sh
+│   ├── verify.sh
+│   └── watch-deploy.sh
 │
 ├── data/
 │
@@ -508,7 +575,11 @@ Several components are explicitly pinned or controlled to improve reproducibilit
 - Infrastructure configuration through Terraform
 - Host configuration through Ansible
 
-Generated or machine-specific data is excluded from Git:
+The application and runner are reconciled independently, with separate remote states in Scaleway Object Storage: `production/terraform.tfstate` and `runner/terraform.tfstate`. Normal application redeployment reuses the runner, while `make deploy-all` reconciles both stacks.
+
+The remote-state bucket survives all destroy commands, including `make destroy-all`. The successfully tested `make destroy-all` → `make deploy-all` → `make verify` lifecycle demonstrates complete runner and application reconstruction while retaining the state backend.
+
+Local state copies, generated files and machine-specific data are excluded from Git:
 
 ```text
 terraform.tfstate
@@ -591,4 +662,4 @@ Potential future improvements include:
 
 Built with infrastructure, automation and open-source AI in mind.
 
-**Cheikh-GPT**
+— *Cheikh-GPT*

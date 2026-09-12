@@ -144,11 +144,8 @@ apt-get install -y \
   ca-certificates \
   curl \
   git \
-  jq \
   rsync \
   unzip \
-  python3 \
-  python3-venv \
   openssh-client
 
 id github-runner >/dev/null 2>&1 || \
