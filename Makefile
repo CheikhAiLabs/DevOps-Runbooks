@@ -39,7 +39,8 @@ deploy:
 				  y|Y|yes|YES) \
 					git commit -m "$$message"; \
 					git push origin main; \
-					echo "Push complete. GitHub Actions deployment triggered."; \
+					SHA=$$(git rev-parse HEAD); \
+					./scripts/watch-deploy.sh commit "$$SHA"; \
 					;; \
 				  *) echo "Cancelled."; exit 1 ;; \
 				esac \
@@ -51,7 +52,7 @@ deploy:
 			printf "Trigger production deployment? [y/N] "; \
 			read answer; \
 			case "$$answer" in \
-			  y|Y|yes|YES) gh workflow run deploy.yml ;; \
+			  y|Y|yes|YES) ./scripts/watch-deploy.sh dispatch ;; \
 			  *) echo "Cancelled."; exit 1 ;; \
 			esac; \
 		fi; \
@@ -59,6 +60,10 @@ deploy:
 		echo "GitHub CI/CD not configured or gh unavailable."; \
 		echo "Falling back to local deployment."; \
 		./scripts/deploy.sh; \
+		echo; \
+		echo "Application URL:"; \
+		terraform -chdir=infrastructure/terraform output -raw https_url; \
+		echo; \
 	fi
 
 redeploy: deploy

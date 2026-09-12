@@ -134,7 +134,13 @@ jobs:
             echo "## 🚀 Production deployment"
             echo
             echo "- Status: **${{ job.status }}**"
-            echo "- FQDN: https://${{ steps.tf.outputs.fqdn }}"
+            echo "- Application URL: https://${{ steps.tf.outputs.fqdn }}"
             echo "- Runner: scaleway-devops-runbooks-01"
             echo "- Terraform remote state: Scaleway Object Storage"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          echo
+          echo "========================================"
+          echo "Deployment status: ${{ job.status }}"
+          echo "Application URL: https://${{ steps.tf.outputs.fqdn }}"
+          echo "========================================"
