@@ -34,11 +34,13 @@ if [ "$CONFIRM" != "DESTROY-ALL" ]; then
 fi
 
 if [ -z "${SCW_ACCESS_KEY:-}" ]; then
-  export SCW_ACCESS_KEY="$(scw config get access-key)"
+  SCW_ACCESS_KEY="$(scw config get access-key)"
+  export SCW_ACCESS_KEY
 fi
 
 if [ -z "${SCW_SECRET_KEY:-}" ]; then
-  export SCW_SECRET_KEY="$(scw config get secret-key)"
+  SCW_SECRET_KEY="$(scw config get secret-key)"
+  export SCW_SECRET_KEY
 fi
 
 export AWS_ACCESS_KEY_ID="$SCW_ACCESS_KEY"
@@ -62,7 +64,8 @@ if [ -z "$PROJECT_ID" ]; then
 fi
 
 export TF_VAR_project_id="$PROJECT_ID"
-export TF_VAR_operator_cidr="$(curl -4 -fsS https://api.ipify.org)/32"
+TF_VAR_operator_cidr="$(curl -4 -fsS https://api.ipify.org)/32"
+export TF_VAR_operator_cidr
 
 echo
 echo "==> 1/3 Destroying application stack"

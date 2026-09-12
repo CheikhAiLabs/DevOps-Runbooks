@@ -16,11 +16,13 @@ echo "2/2  Application stack"
 echo
 
 if [ -z "${SCW_ACCESS_KEY:-}" ]; then
-  export SCW_ACCESS_KEY="$(scw config get access-key)"
+  SCW_ACCESS_KEY="$(scw config get access-key)"
+  export SCW_ACCESS_KEY
 fi
 
 if [ -z "${SCW_SECRET_KEY:-}" ]; then
-  export SCW_SECRET_KEY="$(scw config get secret-key)"
+  SCW_SECRET_KEY="$(scw config get secret-key)"
+  export SCW_SECRET_KEY
 fi
 
 if [ -z "$SCW_ACCESS_KEY" ] || [ -z "$SCW_SECRET_KEY" ]; then
