@@ -1,8 +1,9 @@
-.PHONY: help deploy redeploy verify status logs reindex access plan fmt destroy
+.PHONY: help deploy deploy-all redeploy verify status logs reindex access plan fmt destroy destroy-all deploy-local deploy-ci
 
 help:
 	@printf '%s\n' \
-	  'make deploy    Create/update the full stack' \
+	  'make deploy      Create/update the application stack' \
+	  'make deploy-all  Create/update runner + application stack' \
 	  'make redeploy  Idempotently run the full deployment again' \
 	  'make verify    Run end-to-end health checks' \
 	  'make status    Show services and resources' \
@@ -10,7 +11,8 @@ help:
 	  'make reindex   Rebuild the Linux knowledge index' \
 	  'make access    Allow the current public IP in SSH/Nginx' \
 	  'make plan      Show Terraform plan' \
-	  'make destroy   Destroy Scaleway infrastructure'
+	  'make destroy     Destroy the application stack' \
+	  'make destroy-all Destroy runner + application stack'
 
 deploy:
 	@if git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
@@ -66,6 +68,11 @@ deploy:
 		echo; \
 	fi
 
+deploy-all:
+	@./scripts/deploy-all.sh
+
+
+
 redeploy: deploy
 
 verify:
@@ -101,6 +108,12 @@ fmt:
 
 destroy:
 	@./scripts/destroy.sh
+
+
+destroy-all:
+	@./scripts/destroy-all.sh
+
+
 
 
 deploy-local:
